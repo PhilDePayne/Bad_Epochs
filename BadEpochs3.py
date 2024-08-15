@@ -11,14 +11,14 @@
 9. RANSAC + ICA (EOG + EMG)
 10. FASTER (no interpolation)
 11. FASTER (no interpolation) + ICA (EOG)
-12. FASTER (no interpolation) + ICA (EOG + EMG)
+12. FASTER (no interpolation) + ICA (EOG + EMG)  #TODO
 13. FASTER (interpolation)
 14. FASTER (interpolation) + ICA (EOG)
-15. FASTER (interpolation) + ICA (EOG + EMG)
+15. FASTER (interpolation) + ICA (EOG + EMG) #TODO
 """
 
 methods_quantity = 16
-method = 12
+method = 10
 
 EOG_proxy = 'EEG 001'
 repeat_count = 1
@@ -29,16 +29,20 @@ classes_grouping = 1 # 0 - audio/visual, 1 - left/right
 
 #====== IMPORTS ======#
 
+# General imports
 import numpy as np
 import statistics
 import math
 from collections import Counter
+import os
 
 # mne imports
 import mne
 from mne import io
 from mne.datasets import sample
 from mne.preprocessing import ICA, corrmap, create_ecg_epochs, create_eog_epochs
+from mne import Epochs, find_events
+from mne.channels import make_standard_montage
 
 # EEGNet-specific imports
 from EEGModels import EEGNet
@@ -58,7 +62,15 @@ from autoreject.utils import interpolate_bads
 from mne_faster import (find_bad_channels, find_bad_epochs,
                         find_bad_components, find_bad_channels_in_epochs)
 
-import os
+# moabb imports
+import moabb
+from moabb.datasets import Cattan2019_VR
+from mne.decoding import Vectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import make_pipeline
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
+from moabb.paradigms import P300
 
 #====== FUNC ======#
 def find_AR_interpolated(reject_log):
@@ -122,6 +134,7 @@ def clean_data_FASTER(epochs):
         ica.apply(epochs_FASTER)
         # Need to re-baseline data after ICA transformation
         epochs_FASTER.apply_baseline(epochs_FASTER.baseline)
+        
 
     # Step 4: mark bad channels for each epoch and interpolate them.
     if(interpolate):
@@ -243,7 +256,7 @@ def run_EEGNet(epochs, clean_epochs):
     X, y = balance(X, y)
 
     # format is in (trials, channels, samples)
-    kernels, chans, samples = 1, 60, 151
+    kernels, chans, samples = 1, 14, 513
 
     size = y.shape[0]
     halfSize = int(size * 0.5)
@@ -341,6 +354,7 @@ def run_EEGNet(epochs, clean_epochs):
     acc         = np.mean(preds == Y_test.argmax(axis=-1))
     #print("Classification accuracy: %f " % (acc))
     plt.clf()
+    
     plot(fittedModel, str(method) + '.png')
     
     return acc
@@ -371,46 +385,24 @@ interpolate = False # not available for RANSAC
 
 #====== MAIN ======#
 def main_process():
-    set_params(method)
+    # Load the dataset
+    dataset = Cattan2019_VR()
+    paradigm = P300()
 
-    # while the default tensorflow ordering is 'channels_last' we set it here
-    # to be explicit in case if the user has changed the default ordering
-    K.set_image_data_format('channels_last')
-
-    # Set parameters and read data
-    raw_fname = os.path.join('./Data',  'sample_audvis_filt-0-40_raw.fif')
-    event_fname = os.path.join('./Data', 'sample_audvis_filt-0-40_raw-eve.fif')
-    tmin, tmax = -0., 1
-    event_id = dict(aud_l=1, aud_r=2, vis_l=3, vis_r=4)
-
-    # Setup for reading the raw data
-    raw = io.Raw(raw_fname, preload=True, verbose=log_info)
-    raw.filter(2, None, method='iir')  # replace baselining with high-pass
-    events = mne.read_events(event_fname)
+    # Select a subject and load the raw data
+    subject = 3
+    epochs, labels, _ = paradigm.get_data(dataset, subjects=[subject], return_epochs=True)
     
-    #print(events)
-
-    raw.info['bads'] = ['MEG 2443']  # set bad channels
-
-    picks = mne.pick_types(raw.info, meg=False, eeg=True, stim=False, eog=False,
-                           exclude='bads')
-
-    # Read epochs
-    epochs = mne.Epochs(raw, events, event_id, tmin, tmax, proj=False,
-                        picks=picks, baseline=None, preload=True, verbose=log_info)
+    channels_to_drop = ['Fc5', 'Fc6']
     
-    if nb_classes == 2:
-        if classes_grouping == 0:
-            epochs = mne.epochs.combine_event_ids(epochs, ['aud_l', 'aud_r'], {'aud': 6})
-            epochs = mne.epochs.combine_event_ids(epochs, ['vis_l', 'vis_r'], {'vis': 7})
-            epochs = mne.epochs.combine_event_ids(epochs, ['aud'], {'audio': 1})
-            epochs = mne.epochs.combine_event_ids(epochs, ['vis'], {'visual': 2})
-        elif classes_grouping == 1:
-            epochs = mne.epochs.combine_event_ids(epochs, ['aud_l', 'vis_l'], {'l': 6})
-            epochs = mne.epochs.combine_event_ids(epochs, ['aud_r', 'vis_r'], {'r': 7})
-            epochs = mne.epochs.combine_event_ids(epochs, ['l'], {'left': 1})
-            epochs = mne.epochs.combine_event_ids(epochs, ['r'], {'right': 2})
-
+    epochs = epochs.drop_channels(channels_to_drop)
+    
+    montage = make_standard_montage('standard_1005')
+    epochs.set_montage(montage)
+    
+    for ch in epochs.info['chs']:
+        ch['loc'][3:6] = [0.00235201,  0.11096951, -0.03500458]
+    
     clean_epochs = None
 
     if(method == 0):
@@ -421,7 +413,7 @@ def main_process():
         clean_epochs = clean_data_RANSAC(epochs)
     elif(cleaning_method == 'FASTER'):
         clean_epochs, bad_epochs = clean_data_FASTER(epochs)
-        
+
     mse_first, rmse_first, snr_first, prd_first = calculate_ERP(epochs, clean_epochs, 1)
     
     mse_second, rmse_second, snr_second, prd_second = calculate_ERP(epochs, clean_epochs, 2)

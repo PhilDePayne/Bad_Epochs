@@ -11,34 +11,45 @@
 9. RANSAC + ICA (EOG + EMG)
 10. FASTER (no interpolation)
 11. FASTER (no interpolation) + ICA (EOG)
-12. FASTER (no interpolation) + ICA (EOG + EMG)
+12. FASTER (no interpolation) + ICA (EOG + EMG)  #TODO
 13. FASTER (interpolation)
 14. FASTER (interpolation) + ICA (EOG)
-15. FASTER (interpolation) + ICA (EOG + EMG)
+15. FASTER (interpolation) + ICA (EOG + EMG) #TODO
 """
 
 methods_quantity = 16
-method = 12
+method = 1
 
-EOG_proxy = 'EEG 001'
+EOG_proxy = 'Fp1'
 repeat_count = 1
 log_info = False
 
-nb_classes = 2
-classes_grouping = 1 # 0 - audio/visual, 1 - left/right
-
 #====== IMPORTS ======#
 
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout, BatchNormalization
+from tensorflow.keras.utils import to_categorical
+from tensorflow.keras.optimizers import Adam
+from tensorflow.keras.callbacks import EarlyStopping
+from sklearn.metrics import classification_report
+import moabb
+
+import math
 import numpy as np
 import statistics
-import math
 from collections import Counter
 
 # mne imports
 import mne
-from mne import io
-from mne.datasets import sample
-from mne.preprocessing import ICA, corrmap, create_ecg_epochs, create_eog_epochs
+from mne.datasets import eegbci
+from mne.preprocessing import ICA
+from mne import Epochs, pick_types
+from mne.channels import make_standard_montage
+from mne.datasets import eegbci
+from mne.decoding import CSP
+from mne.io import concatenate_raws, read_raw_edf
 
 # EEGNet-specific imports
 from EEGModels import EEGNet
@@ -233,18 +244,18 @@ def percentage_root_mean_square_difference(raw, clean):
     
     return prd
     
-def run_EEGNet(epochs, clean_epochs):
+def run_EEGNet(raw, epochs_train, clean_epochs):
     
     labels = clean_epochs.events[:, -1]
+
     # extract raw data. scale by 1000 due to scaling sensitivity in deep learning
     X = clean_epochs.get_data()*1000 
     y = labels
     
-    X, y = balance(X, y)
+    #X, y = balance(X, y)
 
     # format is in (trials, channels, samples)
-    kernels, chans, samples = 1, 60, 151
-
+    kernels, chans, samples = 1, 32, int(raw.info['sfreq']) + 1
     size = y.shape[0]
     halfSize = int(size * 0.5)
     tQuarterSize = int(halfSize + (halfSize * 0.5))
@@ -255,8 +266,8 @@ def run_EEGNet(epochs, clean_epochs):
     Y_train      = y[0:halfSize]
     X_validate   = X[halfSize:tQuarterSize,]
     Y_validate   = y[halfSize:tQuarterSize]
-    X_test       = (epochs.get_data()*1000)[tQuarterSize:,]
-    Y_test       = (epochs.events[:,-1])[tQuarterSize:]
+    X_test       = (epochs_train.get_data()*1000)[tQuarterSize:,]
+    Y_test       = (epochs_train.events[:,-1])[tQuarterSize:]
 
     ############################# EEGNet portion ##################################
 
@@ -270,7 +281,7 @@ def run_EEGNet(epochs, clean_epochs):
     X_train      = X_train.reshape(X_train.shape[0], chans, samples, kernels)
     X_validate   = X_validate.reshape(X_validate.shape[0], chans, samples, kernels)
     X_test       = X_test.reshape(X_test.shape[0], chans, samples, kernels)
-
+    
     if log_info:
         print('X_train shape:', X_train.shape)
         print(X_train.shape[0], 'train samples')
@@ -278,6 +289,7 @@ def run_EEGNet(epochs, clean_epochs):
 
     # configure the EEGNet-8,2,16 model with kernel length of 32 samples (other 
     # model configurations may do better, but this is a good starting point)
+    nb_classes = 2
     model = EEGNet(nb_classes = nb_classes, Chans = chans, Samples = samples, 
                    dropoutRate = 0.5, kernLength = 32, F1 = 8, D = 2, F2 = 16, 
                    dropoutType = 'Dropout')
@@ -303,10 +315,8 @@ def run_EEGNet(epochs, clean_epochs):
     # the syntax is {class_1:weight_1, class_2:weight_2,...}. Here just setting
     # the weights all to be 1
     #
-    if nb_classes == 4:
-        class_weights = {0:1, 1:1, 2:1, 3:1}
-    elif nb_classes == 2:
-        class_weights = {0:1, 1:1}
+    #class_weights = {0:1, 1:1, 2:1, 3:1}
+    class_weights = {0:1, 1:1}
 
     ################################################################################
     # fit the model. Due to very small sample sizes this can get
@@ -363,6 +373,7 @@ def calculate_ERP(epochs, clean_epochs, class_nr):
     prd = (percentage_root_mean_square_difference(raw_data, clean_data))
     
     return mse, rmse, snr, prd
+
 #====== PARAMS ======#
 
 cleaning_method = 'AR' # AR, RANSAC, FASTER
@@ -372,66 +383,78 @@ interpolate = False # not available for RANSAC
 #====== MAIN ======#
 def main_process():
     set_params(method)
+    
+    print(moabb.__version__)
 
     # while the default tensorflow ordering is 'channels_last' we set it here
     # to be explicit in case if the user has changed the default ordering
     K.set_image_data_format('channels_last')
+    
+    raw_fnames = ['./Data/VR_MI/P1_E3.edf', './Data/VR_MI/P2_E3.edf', './Data/VR_MI/P3_E3.edf']
+    raw = concatenate_raws([read_raw_edf(f, preload=True) for f in raw_fnames])
+    
+    mapping = {
+    'FP1': 'Fp1',  # Example mapping
+    'FP2': 'Fp2',
+    'FZ': 'Fz',
+    'FCZ': 'FCz',
+    'CZ': 'Cz',
+    'CPZ' : 'CPz',
+    'PZ' : 'Pz',
+    'POZ' : 'POz'
+    }
+    raw.rename_channels(mapping)
+    
+    print(raw.info)
 
     # Set parameters and read data
-    raw_fname = os.path.join('./Data',  'sample_audvis_filt-0-40_raw.fif')
-    event_fname = os.path.join('./Data', 'sample_audvis_filt-0-40_raw-eve.fif')
-    tmin, tmax = -0., 1
-    event_id = dict(aud_l=1, aud_r=2, vis_l=3, vis_r=4)
-
-    # Setup for reading the raw data
-    raw = io.Raw(raw_fname, preload=True, verbose=log_info)
-    raw.filter(2, None, method='iir')  # replace baselining with high-pass
-    events = mne.read_events(event_fname)
+    tmin, tmax = -1.0, 4.0
+    montage = make_standard_montage('standard_1020')
+    raw.set_montage(montage)
+    raw.set_eeg_reference(ref_channels='average')
     
-    #print(events)
+    for ch in raw.info['chs']:
+        ch['loc'][3:6] = [0.00235201,  0.11096951, -0.03500458]
 
-    raw.info['bads'] = ['MEG 2443']  # set bad channels
+    raw.filter(2.0, 40.0, fir_design="firwin", skip_by_annotation="edge")
 
-    picks = mne.pick_types(raw.info, meg=False, eeg=True, stim=False, eog=False,
-                           exclude='bads')
+    picks = pick_types(raw.info, meg=False, eeg=True, stim=False, eog=False, exclude="bads")
+    events, event_id = mne.events_from_annotations(raw)
 
-    # Read epochs
-    epochs = mne.Epochs(raw, events, event_id, tmin, tmax, proj=False,
-                        picks=picks, baseline=None, preload=True, verbose=log_info)
-    
-    if nb_classes == 2:
-        if classes_grouping == 0:
-            epochs = mne.epochs.combine_event_ids(epochs, ['aud_l', 'aud_r'], {'aud': 6})
-            epochs = mne.epochs.combine_event_ids(epochs, ['vis_l', 'vis_r'], {'vis': 7})
-            epochs = mne.epochs.combine_event_ids(epochs, ['aud'], {'audio': 1})
-            epochs = mne.epochs.combine_event_ids(epochs, ['vis'], {'visual': 2})
-        elif classes_grouping == 1:
-            epochs = mne.epochs.combine_event_ids(epochs, ['aud_l', 'vis_l'], {'l': 6})
-            epochs = mne.epochs.combine_event_ids(epochs, ['aud_r', 'vis_r'], {'r': 7})
-            epochs = mne.epochs.combine_event_ids(epochs, ['l'], {'left': 1})
-            epochs = mne.epochs.combine_event_ids(epochs, ['r'], {'right': 2})
+    epochs = Epochs(
+        raw,
+        events=events,
+        event_id=event_id,
+        tmin=tmin,
+        tmax=tmax,
+        proj=True,
+        picks=picks,
+        baseline=None,
+        preload=True,
+    )
+    raw_epochs = epochs.copy().crop(tmin=0.0, tmax=1.0)
 
     clean_epochs = None
 
     if(method == 0):
-        clean_epochs = epochs
+        clean_epochs = raw_epochs
     elif(cleaning_method == 'AR'):
-        clean_epochs, bad_epochs = clean_data_AR(epochs)    
+        clean_epochs, bad_epochs = clean_data_AR(raw_epochs)    
     elif(cleaning_method == 'RANSAC'):
-        clean_epochs = clean_data_RANSAC(epochs)
+        clean_epochs = clean_data_RANSAC(raw_epochs)
     elif(cleaning_method == 'FASTER'):
-        clean_epochs, bad_epochs = clean_data_FASTER(epochs)
+        clean_epochs, bad_epochs = clean_data_FASTER(raw_epochs)
         
-    mse_first, rmse_first, snr_first, prd_first = calculate_ERP(epochs, clean_epochs, 1)
+    mse_first, rmse_first, snr_first, prd_first = calculate_ERP(raw_epochs, clean_epochs, 1)
     
-    mse_second, rmse_second, snr_second, prd_second = calculate_ERP(epochs, clean_epochs, 2)
+    mse_second, rmse_second, snr_second, prd_second = calculate_ERP(raw_epochs, clean_epochs, 2)
     
     mse = (mse_first + mse_second) / 2
     rmse = (rmse_first + rmse_second) / 2
     snr = (snr_first + snr_second) / 2
     prd = (prd_first + prd_second) / 2
-    
-    return epochs, clean_epochs, mse, rmse, snr, prd
+
+    return raw, raw_epochs, clean_epochs, mse, rmse, snr, prd
 
 #====== TEST ======#
 file_path = "./res.txt"
@@ -443,11 +466,12 @@ with open(file_path, 'w') as file:
         file.write(str(x))
         file.write(".\n")
         acc_sum = []
-        raw, clean, mse, rmse, snr, prd = main_process()
+        raw, raw_epochs, clean_epochs, mse, rmse, snr, prd = main_process()
+        
         file.write(str(mse) + " " + str(rmse) + " " + str(snr) + " " + str(prd) + "\n")
         
         for y in range(repeat_count):
-            acc_sum.append(run_EEGNet(raw, clean))
+            acc_sum.append(run_EEGNet(raw, raw_epochs, clean_epochs))
             print(y + 1, "/", repeat_count)
         file.write(str(acc_sum) + '\n')   
         file.write(str(statistics.mean(acc_sum)) + '\n') 

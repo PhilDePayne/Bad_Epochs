@@ -18,7 +18,7 @@
 """
 
 methods_quantity = 16
-method = 0
+method = 13
 
 EOG_proxy = 'Fp1'
 repeat_count = 1
@@ -26,6 +26,7 @@ log_info = False
 
 #====== IMPORTS ======#
 
+import math
 import numpy as np
 import statistics
 from collections import Counter
@@ -99,35 +100,41 @@ def clean_data_RANSAC(epochs):
         return epochs_ransac
 
 def clean_data_FASTER(epochs):
+    epochs_FASTER = epochs.copy()
     if(interpolate):
-        epochs.info['bads'] = find_bad_channels(epochs, eeg_ref_corr=True)
-        if len(epochs.info['bads']) > 0:
-            epochs.interpolate_bads()
+        epochs_FASTER.info['bads'] = find_bad_channels(epochs_FASTER, eeg_ref_corr=True)
+        if len(epochs_FASTER.info['bads']) > 0:
+            epochs_FASTER.interpolate_bads()
 
     # Step 2: mark bad epochs
-    bad_epochs = find_bad_epochs(epochs)
+    bad_epochs = find_bad_epochs(epochs_FASTER)
     if len(bad_epochs) > 0:
-        epochs.drop(bad_epochs)
+        epochs_FASTER.drop(bad_epochs)
 
     # Step 3: mark bad ICA components (using the build-in MNE functionality for this)
     if(ICA_mode != 0):
-        ica = mne.preprocessing.ICA(0.99).fit(epochs)
-        ica.exclude = find_bad_components(ica, epochs, proxy_name=EOG_proxy)
-        ica.apply(epochs)
+        ica = mne.preprocessing.ICA(0.99).fit(epochs_FASTER)
+        if(ICA_mode == 2):
+            muscle_indices, muscle_scores = ica.find_bads_muscle(epochs,
+                                                         threshold = 0.7)
+            ica.exclude += muscle_indices
+        ica.exclude += find_bad_components(ica, epochs_FASTER, proxy_name=EOG_proxy)
+        
+        ica.apply(epochs_FASTER)
         # Need to re-baseline data after ICA transformation
-        epochs.apply_baseline(epochs.baseline)
+        epochs_FASTER.apply_baseline(epochs_FASTER.baseline)
 
     # Step 4: mark bad channels for each epoch and interpolate them.
     if(interpolate):
-        bad_channels_per_epoch = find_bad_channels_in_epochs(epochs, eeg_ref_corr=True)
+        bad_channels_per_epoch = find_bad_channels_in_epochs(epochs_FASTER, eeg_ref_corr=True)
         for i, b in enumerate(bad_channels_per_epoch):
             if len(b) > 0:
-                ep = epochs[i]
+                ep = epochs_FASTER[i]
                 ep.info['bads'] = b
                 ep.interpolate_bads() 
-                epochs._data[i, :, :] = ep._data[0, :, :]
+                epochs_FASTER._data[i, :, :] = ep._data[0, :, :]
             
-    return epochs, bad_epochs
+    return epochs_FASTER, bad_epochs
 
 def perform_ICA(epochs):
     ica = ICA(n_components=20, max_iter="auto", random_state=97)
@@ -199,71 +206,36 @@ def plot(history, name):
     plt.savefig(name)
     plt.close()
 
-#====== PARAMS ======#
+def mean_square_error(raw, clean):
+    squared_errors = (raw - clean) ** 2
+    
+    mse = np.mean(squared_errors)
+    
+    return mse
 
-cleaning_method = 'AR' # AR, RANSAC, FASTER
-ICA_mode = 0 # 0-no ICA, 1-EOG, 2-EOG+EMG (2. not available for FASTER)
-interpolate = False # not available for RANSAC
+def root_mean_square_error(raw, clean):
+    return math.sqrt(mean_square_error(raw, clean))
 
-#====== MAIN ======#
-def main_process():
-    set_params(method)
+def signal_noise_ratio(raw, clean):
+    squared_raw = raw ** 2
+    
+    squared_errors = (raw - clean) ** 2
+    
+    snr = 10 * np.emath.logn(10, squared_raw/squared_errors)
+    
+    return np.mean(snr)
 
-    # while the default tensorflow ordering is 'channels_last' we set it here
-    # to be explicit in case if the user has changed the default ordering
-    K.set_image_data_format('channels_last')
-
-    # Set parameters and read data
-    tmin, tmax = -1.0, 4.0
-    subjects = [1, 2, 3, 4, 5]
-    runs = [4, 8, 12]  # motor imagery: left vs right
-    runs = [3, 7, 11]
-
-    raw_fnames = []
-    for subject in subjects:
-        raw_fnames = eegbci.load_data(subject, runs, path='./Data/MI')
-                
-    raw = concatenate_raws([read_raw_edf(f, preload=True) for f in raw_fnames])
-    eegbci.standardize(raw)  # set channel names
-    montage = make_standard_montage("standard_1005")
-    raw.set_montage(montage)
-    raw.set_eeg_reference(projection=True)
-    raw.describe()
-
-    # Apply band-pass filter
-    raw.filter(2.0, 40.0, fir_design="firwin", skip_by_annotation="edge")
-
-    picks = pick_types(raw.info, meg=False, eeg=True, stim=False, eog=False, exclude="bads")
-    events, event_id = mne.events_from_annotations(raw, dict(T1=1, T2=2))
-
-    # Read epochs (train will be done only between 1 and 2s)
-    # Testing will be done with a running classifier
-    epochs = Epochs(
-        raw,
-        events=events,
-        event_id=event_id,
-        tmin=tmin,
-        tmax=tmax,
-        proj=True,
-        picks=picks,
-        baseline=None,
-        preload=True,
-    )
-    epochs['T1'].average().plot()
-    epochs_train = epochs.copy().crop(tmin=0.0, tmax=1.0)
-    epochs_train['T1'].average().plot()
-
-    clean_epochs = None
-
-    if(method == 0):
-        clean_epochs = epochs_train
-    elif(cleaning_method == 'AR'):
-        clean_epochs, bad_epochs = clean_data_AR(epochs_train)    
-    elif(cleaning_method == 'RANSAC'):
-        clean_epochs = clean_data_RANSAC(epochs_train)
-    elif(cleaning_method == 'FASTER'):
-        clean_epochs, bad_epochs = clean_data_FASTER(epochs_train)
-
+def percentage_root_mean_square_difference(raw, clean):
+    abs_errors = np.absolute(raw - clean)
+    
+    abs_raw = np.absolute(raw)
+    
+    prd = np.mean(abs_errors / abs_raw) * 100
+    
+    return prd
+    
+def run_EEGNet(raw, epochs_train, clean_epochs):
+    
     labels = clean_epochs.events[:, -1]
 
     # extract raw data. scale by 1000 due to scaling sensitivity in deep learning
@@ -368,26 +340,128 @@ def main_process():
     preds       = probs.argmax(axis = -1)  
     acc         = np.mean(preds == Y_test.argmax(axis=-1))
     #print("Classification accuracy: %f " % (acc))
+    plt.clf()
     plot(fittedModel, str(method) + '.png')
     
     return acc
 
+def calculate_ERP(epochs, clean_epochs, class_nr):
+    raw = epochs[list(filter(lambda x: epochs.event_id[x] == class_nr, epochs.event_id))[0]].average()
+    fig1 = raw.plot(show=False)
+    fig1.savefig(str(method) + "_class" + str(class_nr) + "_raw_ERP_" + ".png")
+    
+    clean = clean_epochs[list(filter(lambda x: clean_epochs.event_id[x] == class_nr, clean_epochs.event_id))[0]].average()
+    fig2 = clean.plot(show=False)
+    fig2.savefig(str(method) + "_class" + str(class_nr) + "_clean_ERP_" + ".png")
+    
+    raw_data = raw.get_data()
+    clean_data = clean.get_data()
+    
+    mse = (mean_square_error(raw_data, clean_data))
+    rmse = (root_mean_square_error(raw_data, clean_data))
+    snr = (signal_noise_ratio(raw_data, clean_data))
+    prd = (percentage_root_mean_square_difference(raw_data, clean_data))
+    
+    return mse, rmse, snr, prd
+
+#====== PARAMS ======#
+
+cleaning_method = 'AR' # AR, RANSAC, FASTER
+ICA_mode = 0 # 0-no ICA, 1-EOG, 2-EOG+EMG (2. not available for FASTER)
+interpolate = False # not available for RANSAC
+
+#====== MAIN ======#
+def main_process():
+    set_params(method)
+
+    # while the default tensorflow ordering is 'channels_last' we set it here
+    # to be explicit in case if the user has changed the default ordering
+    K.set_image_data_format('channels_last')
+
+    # Set parameters and read data
+    tmin, tmax = -1.0, 4.0
+    subjects = [42]
+    runs = [4, 8, 12]  # motor imagery: left vs right
+    runs = [3, 7, 11]
+
+    raw_fnames = []
+    raw_train = None
+    raw_val = None
+    raw_test = None
+    for subject in subjects:
+        raw_fnames += eegbci.load_data(subject, runs, path='./Data/MI')
+                
+    raw = concatenate_raws([read_raw_edf(f, preload=True) for f in raw_fnames])
+    eegbci.standardize(raw)  # set channel names
+    montage = make_standard_montage('standard_1005')
+    raw.set_montage(montage)
+    raw.set_eeg_reference(ref_channels='average')
+    # Get the position of Cz
+    cz_idx = raw.info['ch_names'].index('Cz')
+    cz_loc = raw.info['chs'][cz_idx]['loc'][:3]
+    
+    for ch in raw.info['chs']:
+        ch['loc'][3:6] = [0.00235201,  0.11096951, -0.03500458]
+
+    # Apply band-pass filter
+    raw.filter(2.0, 40.0, fir_design="firwin", skip_by_annotation="edge")
+
+    picks = pick_types(raw.info, meg=False, eeg=True, stim=False, eog=False, exclude="bads")
+    events, event_id = mne.events_from_annotations(raw, dict(T1=1, T2=2))
+
+    # Read epochs (train will be done only between 1 and 2s)
+    # Testing will be done with a running classifier
+    epochs = Epochs(
+        raw,
+        events=events,
+        event_id=event_id,
+        tmin=tmin,
+        tmax=tmax,
+        proj=True,
+        picks=picks,
+        baseline=None,
+        preload=True,
+    )
+    raw_epochs = epochs.copy().crop(tmin=0.0, tmax=1.0)
+
+    clean_epochs = None
+
+    if(method == 0):
+        clean_epochs = raw_epochs
+    elif(cleaning_method == 'AR'):
+        clean_epochs, bad_epochs = clean_data_AR(raw_epochs)    
+    elif(cleaning_method == 'RANSAC'):
+        clean_epochs = clean_data_RANSAC(raw_epochs)
+    elif(cleaning_method == 'FASTER'):
+        clean_epochs, bad_epochs = clean_data_FASTER(raw_epochs)
+        
+    mse_first, rmse_first, snr_first, prd_first = calculate_ERP(raw_epochs, clean_epochs, 1)
+    
+    mse_second, rmse_second, snr_second, prd_second = calculate_ERP(raw_epochs, clean_epochs, 2)
+    
+    mse = (mse_first + mse_second) / 2
+    rmse = (rmse_first + rmse_second) / 2
+    snr = (snr_first + snr_second) / 2
+    prd = (prd_first + prd_second) / 2
+
+    return raw, raw_epochs, clean_epochs, mse, rmse, snr, prd
+
 #====== TEST ======#
 file_path = "./res.txt"
-print(main_process())
+#print(run_EEGNet(raw, et, ce))
 
-"""
+
 with open(file_path, 'w') as file:  
     for x in range(methods_quantity):
-        if x != 12 and x != 15:
-            method = x
-            file.write(str(x))
-            file.write(".\n")
-            acc_sum = []
-            for y in range(repeat_count):
-                acc_sum.append(main_process())
-                print(y + 1, "/", repeat_count)
-
-            file.write(str(acc_sum) + '\n')   
-            file.write(str(statistics.mean(acc_sum)) + '\n') 
-"""
+        method = x
+        file.write(str(x))
+        file.write(".\n")
+        acc_sum = []
+        raw, raw_epochs, clean_epochs, mse, rmse, snr, prd = main_process()
+        file.write(str(mse) + " " + str(rmse) + " " + str(snr) + " " + str(prd) + "\n")
+        
+        for y in range(repeat_count):
+            acc_sum.append(run_EEGNet(raw, raw_epochs, clean_epochs))
+            print(y + 1, "/", repeat_count)
+        file.write(str(acc_sum) + '\n')   
+        file.write(str(statistics.mean(acc_sum)) + '\n') 
