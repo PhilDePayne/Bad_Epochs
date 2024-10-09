@@ -18,14 +18,15 @@
 """
 
 methods_quantity = 16
-method = 12
+method = 13
 
 EOG_proxy = 'EEG 001'
-repeat_count = 1
+repeat_count = 10
 log_info = False
 
-nb_classes = 2
-classes_grouping = 1 # 0 - audio/visual, 1 - left/right
+nb_classes = 4
+classes_grouping = 1
+# 0 - audio/visual, 1 - left/right
 
 #====== IMPORTS ======#
 
@@ -125,13 +126,17 @@ def clean_data_FASTER(epochs):
 
     # Step 4: mark bad channels for each epoch and interpolate them.
     if(interpolate):
+        ret = 0
         bad_channels_per_epoch = find_bad_channels_in_epochs(epochs_FASTER, eeg_ref_corr=True)
         for i, b in enumerate(bad_channels_per_epoch):
             if len(b) > 0:
+                ret += 1
                 ep = epochs_FASTER[i]
                 ep.info['bads'] = b
                 ep.interpolate_bads() 
                 epochs_FASTER._data[i, :, :] = ep._data[0, :, :]
+    if log_info:
+        print("Interpolated " + str(ret) + " epochs") 
             
     return epochs_FASTER, bad_epochs
 
@@ -437,8 +442,9 @@ def main_process():
 file_path = "./res.txt"
 #print(main_process())
 
+
 with open(file_path, 'w') as file:  
-    for x in range(methods_quantity):
+    for x in range(10, methods_quantity):
         method = x
         file.write(str(x))
         file.write(".\n")

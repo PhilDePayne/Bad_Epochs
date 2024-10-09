@@ -22,7 +22,7 @@ method = 13
 
 EOG_proxy = 'Fp1'
 repeat_count = 1
-log_info = False
+log_info = True
 
 #====== IMPORTS ======#
 
@@ -126,13 +126,17 @@ def clean_data_FASTER(epochs):
 
     # Step 4: mark bad channels for each epoch and interpolate them.
     if(interpolate):
+        ret = 0
         bad_channels_per_epoch = find_bad_channels_in_epochs(epochs_FASTER, eeg_ref_corr=True)
         for i, b in enumerate(bad_channels_per_epoch):
             if len(b) > 0:
+                ret += 1
                 ep = epochs_FASTER[i]
                 ep.info['bads'] = b
                 ep.interpolate_bads() 
                 epochs_FASTER._data[i, :, :] = ep._data[0, :, :]
+    if log_info:
+        print("Interpolated " + str(ret) + " epochs")     
             
     return epochs_FASTER, bad_epochs
 
@@ -448,9 +452,9 @@ def main_process():
 
 #====== TEST ======#
 file_path = "./res.txt"
-#print(run_EEGNet(raw, et, ce))
+print(main_process())
 
-
+"""
 with open(file_path, 'w') as file:  
     for x in range(methods_quantity):
         method = x
@@ -465,3 +469,4 @@ with open(file_path, 'w') as file:
             print(y + 1, "/", repeat_count)
         file.write(str(acc_sum) + '\n')   
         file.write(str(statistics.mean(acc_sum)) + '\n') 
+"""

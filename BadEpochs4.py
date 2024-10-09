@@ -18,10 +18,10 @@
 """
 
 methods_quantity = 16
-method = 1
+method = 13
 
 EOG_proxy = 'Fp1'
-repeat_count = 1
+repeat_count = 5
 log_info = False
 
 #====== IMPORTS ======#
@@ -136,13 +136,17 @@ def clean_data_FASTER(epochs):
 
     # Step 4: mark bad channels for each epoch and interpolate them.
     if(interpolate):
+        ret = 0
         bad_channels_per_epoch = find_bad_channels_in_epochs(epochs_FASTER, eeg_ref_corr=True)
         for i, b in enumerate(bad_channels_per_epoch):
             if len(b) > 0:
+                ret += 1
                 ep = epochs_FASTER[i]
                 ep.info['bads'] = b
                 ep.interpolate_bads() 
                 epochs_FASTER._data[i, :, :] = ep._data[0, :, :]
+        if log_info:
+            print("Interpolated " + str(ret) + " epochs") 
             
     return epochs_FASTER, bad_epochs
 
@@ -390,11 +394,13 @@ def main_process():
     # to be explicit in case if the user has changed the default ordering
     K.set_image_data_format('channels_last')
     
-    raw_fnames = ['./Data/VR_MI/P1_E3.edf', './Data/VR_MI/P2_E3.edf', './Data/VR_MI/P3_E3.edf']
+    raw_fnames = ['./Data/VR_MI/P1_E1.edf', './Data/VR_MI/P2_E1.edf', './Data/VR_MI/P3_E1.edf',
+                  './Data/VR_MI/P1_E2.edf', './Data/VR_MI/P2_E2.edf', './Data/VR_MI/P3_E2.edf',
+                  './Data/VR_MI/P1_E3.edf', './Data/VR_MI/P2_E3.edf', './Data/VR_MI/P3_E3.edf',]
     raw = concatenate_raws([read_raw_edf(f, preload=True) for f in raw_fnames])
     
     mapping = {
-    'FP1': 'Fp1',  # Example mapping
+    'FP1': 'Fp1',
     'FP2': 'Fp2',
     'FZ': 'Fz',
     'FCZ': 'FCz',
@@ -459,6 +465,7 @@ def main_process():
 #====== TEST ======#
 file_path = "./res.txt"
 #print(main_process())
+
 
 with open(file_path, 'w') as file:  
     for x in range(methods_quantity):
